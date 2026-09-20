@@ -49,7 +49,7 @@ def get_stock_data(stock_code, stock_name, start_date, end_date):
 
 
 def fill_missing_dates(df, start_date, end_date):
-    """填充缺失的日期"""
+    """对齐日期范围，并剔除无行情的周末/节假日（只保留真实交易日）"""
     date_range = pd.date_range(start=start_date, end=end_date)
     full_df = pd.DataFrame({'日期': date_range})
     full_df['日期'] = pd.to_datetime(full_df['日期'])
@@ -67,6 +67,9 @@ def fill_missing_dates(df, start_date, end_date):
     # 填充股票代码和简称
     merged_df['代码'] = merged_df['代码'].ffill().bfill()
     merged_df['简称'] = merged_df['简称'].ffill().bfill()
+
+    # 剔除无行情的日期（周末/节假日），只保留真实交易日，避免下游产生假数据
+    merged_df = merged_df.dropna(subset=['开盘价(元)', '收盘价(元)']).reset_index(drop=True)
 
     return merged_df
 

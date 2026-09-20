@@ -15,6 +15,10 @@ plt.rcParams['font.sans-serif'] = ['SimHei']
 plt.rcParams['axes.unicode_minus'] = False
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+# 固定随机种子，保证结果可复现
+torch.manual_seed(42)
+np.random.seed(42)
+
 
 class LSTMModel(nn.Module):
     def __init__(self, input_size=2, hidden_size=128, num_layers=3, output_size=2, dropout=0.1):
@@ -36,7 +40,8 @@ def load_and_preprocess_data():
         numeric_columns = ['开盘价(元)', '收盘价(元)']
         for col in numeric_columns:
             if df[col].isnull().any():
-                df[col].fillna(df[col].mean(), inplace=True)
+                # 时序数据使用前向/后向填充，避免均值填充污染序列
+                df[col] = df[col].ffill().bfill()
         return df
     except Exception as e:
         print(f"加载数据失败: {e}")
@@ -98,12 +103,11 @@ def main():
     features = ['开盘价(元)', '收盘价(元)']
     data = df[features].values
 
+    # 先切分再归一化：Scaler 只拟合训练集，避免测试集信息泄漏
+    train_size = int(len(data) * 0.8)
     scaler = MinMaxScaler(feature_range=(0, 1))
-    scaled_data = scaler.fit_transform(data)
-
-    train_size = int(len(scaled_data) * 0.8)
-    train_data = scaled_data[:train_size]
-    test_data = scaled_data[train_size:]
+    train_data = scaler.fit_transform(data[:train_size])
+    test_data = scaler.transform(data[train_size:])
 
     seq_length = 15
 
@@ -131,6 +135,10 @@ def main():
     train_losses = train_model(model, train_loader, criterion, optimizer, num_epochs=300)
     print("训练完成。")
 
+    # 保存模型权重，下次可直接加载，无需重复训练
+    torch.save(model.state_dict(), 'lstm_model.pt')
+    print("模型权重已保存到 'lstm_model.pt'。")
+
     # 训练集评估
     train_predictions, train_actuals = evaluate_model(model, train_loader)
     train_predictions = scaler.inverse_transform(train_predictions)
@@ -146,10 +154,11 @@ def main():
     print(f"训练集 RMSE: {train_rmse:.4f}, MAE: {train_mae:.4f}")
     print(f"测试集 RMSE: {test_rmse:.4f}, MAE: {test_mae:.4f}")
 
-    # 未来30天预测 (2025年6月1日 - 6月30日)
+    # 未来30个交易日预测 (2025年6月)
     model.eval()
     with torch.no_grad():
-        input_seq = scaled_data[-seq_length:].copy()
+        scaled_full = np.vstack([train_data, test_data])
+        input_seq = scaled_full[-seq_length:].copy()
         future_preds_scaled = []
         for _ in range(30):
             inp = torch.FloatTensor(input_seq.reshape(1, seq_length, -1)).to(device)
@@ -160,7 +169,8 @@ def main():
     future_preds = scaler.inverse_transform(np.array(future_preds_scaled))
 
     last_date = df['日期'].iloc[-1]
-    future_dates = pd.date_range(last_date + pd.Timedelta(days=1), periods=30, freq='D')
+    # 使用工作日(freq='B')近似交易日，避免把周末当作交易日
+    future_dates = pd.date_range(last_date + pd.Timedelta(days=1), periods=30, freq='B')
 
     future_df = pd.DataFrame({
         '日期': future_dates,
